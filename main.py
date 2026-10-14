@@ -31,6 +31,7 @@ main.py
 from __future__ import annotations
 
 import time
+import logging
 from typing import List
 
 import ray
@@ -172,7 +173,7 @@ def run_federated_training() -> List[dict]:
     print("\n[Main] 创建 FederatedGraphNode Actors (Clients)...")
     domain_names = {0: "科技", 1: "医疗", 2: "金融"}
 
-    clients: List[ray.actor.ActorHandle] = []
+    clients = []
     for client_id in range(NUM_CLIENTS):
         domain_id = client_id % VOCAB_CONFIG.num_domains
         client = FederatedGraphNode.remote(
@@ -295,7 +296,7 @@ if __name__ == "__main__":
         num_cpus=4,
         ignore_reinit_error=True,
         # 日志级别设为 ERROR，减少 Ray 内部日志噪音
-        logging_level="ERROR",
+        logging_level=logging.ERROR,
     )
     print(f"[Main] Ray 集群资源: {ray.cluster_resources()}")
 
