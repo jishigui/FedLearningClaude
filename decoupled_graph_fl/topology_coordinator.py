@@ -147,22 +147,22 @@ class TopologyCoordinator:
             center = F.normalize(center, p=2, dim=0)        # [D]（L2 归一化）
             client_centers[payload.client_id] = center
 
-        # ── Step 2: 计算全局嵌入中心（简单平均，稳健估计）────────
+        # ── Step 2: 确定全局嵌入中心基准 ────────────────────────
         all_centers = torch.stack(list(client_centers.values()), dim=0)
         # all_centers shape: [K, D]  K = 当前轮参与 client 数
 
-        global_center = all_centers.mean(dim=0)             # [D]
-        global_center = F.normalize(global_center, p=2, dim=0)  # [D]
+        candidate_center = all_centers.mean(dim=0)          # [D]
+        candidate_center = F.normalize(candidate_center, p=2, dim=0)  # [D]
 
-        # 更新历史全局中心（滑动平均，α = 0.7）
-        if self.global_embedding_center is None:
-            self.global_embedding_center = global_center
-        else:
-            alpha = 0.7
-            self.global_embedding_center = (
-                alpha * self.global_embedding_center
-                + (1 - alpha) * global_center
-            )   # [D]
+        # 若已有通过安全聚合的历史全局中心，优先使用历史干净中心作为比对基准；
+        # 若为第 0 轮冷启动，则以本轮候选中心作为初始比对基准。
+        # ⚠️ 注意：不要在此处用未清洗的 candidate_center 更新历史状态，
+        # self.global_embedding_center 统一在 aggregate() 完成加权清洗聚合后再更新！
+        ref_center = (
+            self.global_embedding_center
+            if self.global_embedding_center is not None
+            else candidate_center
+        )
 
         # ── Step 3: 计算余弦相似度并过滤 ────────────────────────
         anomaly_ids: List[int] = []
@@ -172,11 +172,9 @@ class TopologyCoordinator:
             client_id = payload.client_id
             center = client_centers[client_id]              # [D]
 
-            # 与全局中心的余弦相似度（两者均 L2 归一化，故内积 = 余弦相似度）
+            # 与基准中心的余弦相似度（两者均 L2 归一化，故内积 = 余弦相似度）
             # [D] · [D] → scalar
-            cosine_sim: float = torch.dot(
-                center, self.global_embedding_center
-            ).item()
+            cosine_sim: float = torch.dot(center, ref_center).item()
 
             # 域漂移检测
             domain_shift: float = payload.domain_shift
@@ -186,10 +184,11 @@ class TopologyCoordinator:
             # round_id 检测（防重放攻击）
             is_replay: bool = payload.round_id != self.round_id
 
+            current_trust = self.client_trust_scores.get(client_id, 1.0)
             if is_direction_anomaly or is_shift_anomaly or is_replay:
                 anomaly_ids.append(client_id)
-                # 降低信任分（惩罚机制，指数衰减）
-                self.client_trust_scores[client_id] *= 0.5
+                # 降低信任分（惩罚机制，指数衰减，使用 .get 避免 KeyError）
+                self.client_trust_scores[client_id] = current_trust * 0.5
                 reason = []
                 if is_direction_anomaly:
                     reason.append(f"余弦相似度={cosine_sim:.3f}<{self.byzantine_threshold}")
@@ -205,7 +204,7 @@ class TopologyCoordinator:
                 accepted_ids.append(client_id)
                 # 恢复信任分（上界为 1.0）
                 self.client_trust_scores[client_id] = min(
-                    1.0, self.client_trust_scores[client_id] * 1.1
+                    1.0, current_trust * 1.1
                 )
                 print(
                     f"    ✅ [Server] Client {client_id} 验证通过 | "
@@ -384,6 +383,9 @@ class TopologyCoordinator:
         Returns:
             global_payload: 广播给所有 Client 的全局更新载荷
         """
+        if not payloads:
+            raise ValueError(f"Round {self.round_id}: 未接收到任何客户端的 NodePayload")
+
         print(f"\n{'='*60}")
         print(f"[Server] ===== Round {self.round_id} 聚合开始 =====")
         print(f"[Server] 接收到 {len(payloads)} 个 Client 的 Payload")
@@ -419,6 +421,18 @@ class TopologyCoordinator:
 
         # ── 更新 Server 状态 ──────────────────────────────────────
         self.last_global_w = aggregated_w.clone()   # [D, C]  保存历史权重
+
+        # 【安全更新】：使用通过检测并拓扑加权聚合后的纯净全局中心更新历史基准，防止恶意节点污染
+        if self.global_embedding_center is None:
+            self.global_embedding_center = global_embedding.clone()
+        else:
+            alpha = 0.7
+            self.global_embedding_center = F.normalize(
+                alpha * self.global_embedding_center + (1.0 - alpha) * global_embedding,
+                p=2,
+                dim=0,
+            )
+
         self.round_id += 1                          # 轮次计数器递增
 
         print(f"\n[Server] Round {self.round_id - 1} 聚合完成")

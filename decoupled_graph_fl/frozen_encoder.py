@@ -141,13 +141,14 @@ class FrozenEncoder(nn.Module):
         """
         pe = torch.zeros(max_len, dim)                  # [max_len, dim]
         position = torch.arange(0, max_len).unsqueeze(1).float()  # [max_len, 1]
+        half_dim = dim // 2
         div_term = torch.exp(
-            torch.arange(0, dim, 2).float()
-            * (-math.log(10000.0) / dim)
-        )                                               # [dim//2]
+            torch.arange(0, half_dim).float()
+            * (-2.0 * math.log(10000.0) / dim)
+        )                                               # [half_dim]
 
-        pe[:, 0::2] = torch.sin(position * div_term)   # 偶数维：sin
-        pe[:, 1::2] = torch.cos(position * div_term)   # 奇数维：cos
+        pe[:, 0:half_dim * 2:2] = torch.sin(position * div_term)   # 偶数维：sin
+        pe[:, 1:half_dim * 2:2] = torch.cos(position * div_term)   # 奇数维：cos
         return pe                                       # [max_len, dim]
 
     # ─────────────────────────────────────────────────────────────
@@ -185,6 +186,9 @@ class FrozenEncoder(nn.Module):
                         ← 这是唯一会被上传到 Server 的张量！
         """
         B, seq_len = token_ids.shape                    # [B, seq_len]
+        assert seq_len <= self.config.max_seq_len, (
+            f"输入序列长度 seq_len={seq_len} 超过最大允许长度 {self.config.max_seq_len}"
+        )
 
         # ── Step 1: 基础词嵌入查表 ───────────────────────────────
         # 将 token id 限制在本域词表块范围内（域隔离关键操作）

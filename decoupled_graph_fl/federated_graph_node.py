@@ -264,8 +264,11 @@ class FederatedGraphNode:
                     edges.append((i, j))
 
         if not edges:
-            # 至少保留一条边（防止空图）
-            edges = [(0, 1)] if num_nodes > 1 else [(0, 0)]
+            # 至少保留一条边（防止空图）；若 num_nodes <= 1，边索引为空 [2, 0]，自环由 build_normalized_adj 统一添加
+            if num_nodes > 1:
+                edges = [(0, 1)]
+            else:
+                return torch.zeros((2, 0), dtype=torch.long)
 
         src = torch.tensor([e[0] for e in edges], dtype=torch.long)  # [E]
         dst = torch.tensor([e[1] for e in edges], dtype=torch.long)  # [E]
